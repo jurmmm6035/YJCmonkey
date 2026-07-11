@@ -536,13 +536,6 @@ export default function ReactionCalculator() {
               )}
             </div>
 
-            {/* column headers */}
-            <div className="grid gap-3 px-1 pb-2 mb-1" style={{ gridTemplateColumns: "minmax(0,2.4fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)" }}>
-              <div className="text-sm text-slate-500">試劑名稱/代號/CAS</div>
-              <div className="text-sm text-slate-500">分子量 MW</div>
-              <div className="text-sm text-slate-500">用量</div>
-              <div className="text-sm text-slate-500">當量 / mol%</div>
-            </div>
             {rows.length > 1 && (
               <div className="text-xs text-slate-400 mb-2 px-1">向左滑動該列可刪除試劑</div>
             )}
@@ -554,7 +547,7 @@ export default function ReactionCalculator() {
                 return (
                   <SwipeToDeleteRow key={row.id} onDelete={() => removeRow(row.id)} disabled={rows.length <= 1}>
                   <div className={`rounded-lg px-1 py-2 ${isBase ? "bg-sky-50" : "bg-slate-50"}`}>
-                    <div className="grid gap-3 items-center" style={{ gridTemplateColumns: "minmax(0,2.4fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)" }}>
+                    <div className="grid grid-cols-2 gap-2 items-center">
                       {/* name / cas */}
                       <ReagentPicker
                         db={db}
@@ -564,16 +557,12 @@ export default function ReactionCalculator() {
                         onNameChange={(v) => updateRow(row.id, { name: v })}
                         placeholder="名稱/代號/CAS"
                       />
-                      {/* mw */}
-                      <input type="text" inputMode="decimal" value={row.mw}
-                        onChange={(e) => updateRow(row.id, { mw: e.target.value })}
-                        placeholder="MW" className={inputCls} style={ringStyle} />
                       {/* mmol / mass scale input */}
                       {isBase ? (
                         <div className="relative">
                           <input type="text" inputMode="decimal" value={row.scaleValue}
                             onChange={(e) => updateRow(row.id, { scaleValue: e.target.value })}
-                            placeholder={row.scaleUnit === "mmol" ? "mmol" : "重量"}
+                            placeholder={row.scaleUnit === "mmol" ? "用量 mmol" : `用量 ${row.scaleUnit}`}
                             className={inputCls + " pr-12"} style={ringStyle} />
                           <button
                             type="button"
@@ -589,15 +578,22 @@ export default function ReactionCalculator() {
                           </button>
                         </div>
                       ) : (
-                        <div className="px-2.5 py-2 text-sm text-slate-500">{result.mmol !== null ? fmt(result.mmol, 4) : "—"}</div>
+                        <div className={inputCls + " flex items-center"} style={{ borderColor: "transparent" }}>
+                          <span className="text-slate-400 text-xs mr-1">用量</span>
+                          <span className="text-slate-600">{result.mmol !== null ? `${fmt(result.mmol, 4)} mmol` : "—"}</span>
+                        </div>
                       )}
+                      {/* mw */}
+                      <input type="text" inputMode="decimal" value={row.mw}
+                        onChange={(e) => updateRow(row.id, { mw: e.target.value })}
+                        placeholder="分子量 MW" className={inputCls} style={ringStyle} />
                       {/* equiv */}
                       {isBase ? (
-                        <div className="px-2.5 py-2 text-sm text-slate-400">1.0（基準）</div>
+                        <div className={inputCls} style={{ borderColor: "transparent", color: "#94a3b8" }}>1.0（基準）</div>
                       ) : (
                         <input type="text" value={row.equivInput}
                           onChange={(e) => updateRow(row.id, { equivInput: e.target.value })}
-                          placeholder="2.05 或 2.5%" className={inputCls} style={ringStyle} />
+                          placeholder="當量 / mol%" className={inputCls} style={ringStyle} />
                       )}
                     </div>
 
