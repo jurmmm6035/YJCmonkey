@@ -86,12 +86,14 @@ function csvToRows(text) {
   return rows;
 }
 
-function newRow(isLimiting = false) {
-  return { id: uid(), name: "", cas: "", mw: "", mmol: "", scaleUnit: "mmol", scaleValue: "", equivInput: "", isLimiting, remember: false, sampleCode: "" };
+function newRow() {
+  return { id: uid(), name: "", cas: "", mw: "", mmol: "", scaleUnit: "mmol", scaleValue: "", equivInput: "", remember: false, sampleCode: "" };
 }
 
 const SCALE_UNITS = ["mmol", "mg", "g"];
 
+// Raw mmol implied by the "known amount" row's own scale input (mmol/mg/g),
+// independent of what equivalent that row happens to represent.
 function computeBaseMmol(row) {
   const mw = parseFloat(row.mw);
   const val = parseFloat(row.scaleValue);
@@ -268,23 +270,28 @@ export default function ReactionCalculator() {
   function removeRow(id) {
     setRows((r) => r.filter((row) => row.id !== id));
   }
-  function setLimiting(id) {
-    setRows((r) => r.map((row) => ({ ...row, isLimiting: row.id === id })));
-  }
-  function unsetLimiting(id) {
-    setRows((r) => r.map((row) => (row.id === id ? { ...row, isLimiting: false } : row)));
-  }
 
-  const limitingRow = rows.find((r) => r.isLimiting);
-  const baseMmol = limitingRow ? computeBaseMmol(limitingRow) : NaN;
-  const baseValid = !!limitingRow && !isNaN(baseMmol) && baseMmol > 0;
+  // Auto-detect the "reference" row: whichever row has a 用量 value typed in
+  // becomes the basis for the whole calculation — no explicit toggle needed.
+  const rowsWithScale = rows.filter((r) => r.scaleValue && r.scaleValue.trim() !== "");
+  const referenceRow = rowsWithScale.length === 1 ? rowsWithScale[0] : null;
+  const multipleScaleFilled = rowsWithScale.length > 1;
+
+  // mmol of the physically-weighed reference reagent, at whatever equivalent it actually is.
+  const rawKnownMmol = referenceRow ? computeBaseMmol(referenceRow) : NaN;
+  const knownEquivParsed = referenceRow ? parseEquivInput(referenceRow.equivInput) : null;
+  const knownEquiv = knownEquivParsed ? knownEquivParsed.equiv : 1; // blank = assume 1.0 equiv
+  // True 1.0-equivalent scale of the reaction, back-calculated from the reference row.
+  const baseMmol = !isNaN(rawKnownMmol) && knownEquiv > 0 ? rawKnownMmol / knownEquiv : NaN;
+  const baseValid = !!referenceRow && !isNaN(baseMmol) && baseMmol > 0;
 
   function computeRow(row) {
     const mw = parseFloat(row.mw);
-    if (row.isLimiting) {
-      if (isNaN(baseMmol) || baseMmol <= 0) return { mmol: null, mass: null };
-      if (isNaN(mw) || mw <= 0) return { mmol: baseMmol, mass: null };
-      return { mmol: baseMmol, mass: baseMmol * mw };
+    const isReference = !!referenceRow && row.id === referenceRow.id;
+    if (isReference) {
+      if (isNaN(rawKnownMmol) || rawKnownMmol <= 0) return { mmol: null, mass: null };
+      if (isNaN(mw) || mw <= 0) return { mmol: rawKnownMmol, mass: null };
+      return { mmol: rawKnownMmol, mass: rawKnownMmol * mw };
     }
     const parsed = parseEquivInput(row.equivInput);
     if (!baseValid || isNaN(mw) || mw <= 0 || !parsed) return { mmol: null, mass: null };
@@ -485,9 +492,14 @@ export default function ReactionCalculator() {
             )}
           </div>
 
-          {!limitingRow && (
+          {!referenceRow && !multipleScaleFilled && (
             <div className="text-xs text-amber-600 flex items-center gap-1.5 bg-amber-50 rounded-lg px-3 py-2 mb-3">
-              <AlertCircle size={14} /> 請先在其中一列勾選「限量試劑」，作為換算基準
+              <AlertCircle size={14} /> 請在其中一列的「用量」欄位輸入實際秤重／mmol，作為換算基準
+            </div>
+          )}
+          {multipleScaleFilled && (
+            <div className="text-xs text-amber-600 flex items-center gap-1.5 bg-amber-50 rounded-lg px-3 py-2 mb-3">
+              <AlertCircle size={14} /> 目前有多列都填了用量，只能有一列作為基準，請清空其餘欄位
             </div>
           )}
 
@@ -543,7 +555,7 @@ export default function ReactionCalculator() {
             <div className="space-y-2">
               {rows.map((row) => {
                 const result = computeRow(row);
-                const isBase = row.isLimiting;
+                const isBase = !!referenceRow && row.id === referenceRow.id;
                 return (
                   <SwipeToDeleteRow key={row.id} onDelete={() => removeRow(row.id)} disabled={rows.length <= 1}>
                   <div className={`rounded-lg px-1 py-2 ${isBase ? "bg-sky-50" : "bg-slate-50"}`}>
@@ -557,47 +569,37 @@ export default function ReactionCalculator() {
                         onNameChange={(v) => updateRow(row.id, { name: v })}
                         placeholder="名稱/代號/CAS"
                       />
-                      {/* mmol / mass scale input */}
-                      {isBase ? (
-                        <div className="relative">
-                          <input type="text" inputMode="decimal" value={row.scaleValue}
-                            onChange={(e) => updateRow(row.id, { scaleValue: e.target.value })}
-                            placeholder={row.scaleUnit === "mmol" ? "用量 mmol" : `用量 ${row.scaleUnit}`}
-                            className={inputCls + " pr-12"} style={ringStyle} />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const idx = SCALE_UNITS.indexOf(row.scaleUnit);
-                              updateRow(row.id, { scaleUnit: SCALE_UNITS[(idx + 1) % SCALE_UNITS.length] });
-                            }}
-                            className="absolute right-1 top-1/2 -translate-y-1/2 text-xs font-medium px-1.5 py-1 rounded-md hover:bg-slate-100"
-                            style={{ color: ACCENT }}
-                            title="切換單位（mmol / mg / g）"
-                          >
-                            {row.scaleUnit}
-                          </button>
-                        </div>
-                      ) : (
-                        <div className={inputCls + " flex items-center"} style={{ borderColor: "transparent" }}>
-                          <span className="text-slate-400 text-xs mr-1">用量</span>
-                          <span className="text-slate-600">{result.mmol !== null ? `${fmt(result.mmol, 4)} mmol` : "—"}</span>
-                        </div>
-                      )}
+                      {/* 用量: always editable — whichever row has this filled becomes the reference */}
+                      <div className="relative">
+                        <input type="text" inputMode="decimal" value={row.scaleValue}
+                          onChange={(e) => updateRow(row.id, { scaleValue: e.target.value })}
+                          placeholder={row.scaleUnit === "mmol" ? "用量 mmol" : `用量 ${row.scaleUnit}`}
+                          className={inputCls + " pr-12"} style={ringStyle} />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const idx = SCALE_UNITS.indexOf(row.scaleUnit);
+                            updateRow(row.id, { scaleUnit: SCALE_UNITS[(idx + 1) % SCALE_UNITS.length] });
+                          }}
+                          className="absolute right-1 top-1/2 -translate-y-1/2 text-xs font-medium px-1.5 py-1 rounded-md hover:bg-slate-100"
+                          style={{ color: ACCENT }}
+                          title="切換單位（mmol / mg / g）"
+                        >
+                          {row.scaleUnit}
+                        </button>
+                      </div>
                       {/* mw */}
                       <input type="text" inputMode="decimal" value={row.mw}
                         onChange={(e) => updateRow(row.id, { mw: e.target.value })}
                         placeholder="分子量 MW" className={inputCls} style={ringStyle} />
                       {/* equiv */}
-                      {isBase ? (
-                        <div className={inputCls} style={{ borderColor: "transparent", color: "#94a3b8" }}>1.0（基準）</div>
-                      ) : (
-                        <input type="text" value={row.equivInput}
-                          onChange={(e) => updateRow(row.id, { equivInput: e.target.value })}
-                          placeholder="當量 / mol%" className={inputCls} style={ringStyle} />
-                      )}
+                      <input type="text" value={row.equivInput}
+                        onChange={(e) => updateRow(row.id, { equivInput: e.target.value })}
+                        placeholder={isBase ? "當量（預設 1.0）" : "當量 / mol%"}
+                        className={inputCls} style={ringStyle} />
                     </div>
 
-                    {/* weight line + remember + limiting reagent checkbox */}
+                    {/* weight line + remember */}
                     <div className="flex items-center justify-between px-1 mt-1.5 flex-wrap gap-2">
                       <div className="text-sm flex items-baseline gap-1.5">
                         {isBase && row.scaleUnit !== "mmol" ? (
@@ -635,12 +637,9 @@ export default function ReactionCalculator() {
                             </button>
                           </>
                         )}
-                        <label className="flex items-center gap-1.5 text-xs font-medium" style={{ color: isBase ? ACCENT : "#64748b" }}>
-                          <input type="checkbox" checked={isBase}
-                            onChange={(e) => (e.target.checked ? setLimiting(row.id) : unsetLimiting(row.id))}
-                            className="rounded" />
-                          限量試劑
-                        </label>
+                        {isBase && (
+                          <span className="text-xs font-medium" style={{ color: ACCENT }}>用量基準</span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -681,7 +680,7 @@ export default function ReactionCalculator() {
               return filtered.map((s) => {
                 const isExpanded = expandedReactionId === s.id;
                 const confirming = confirmDeleteId === s.id;
-                const limiting = s.rows.find((r) => r.isLimiting);
+                const limiting = s.rows.find((r) => r.scaleValue && String(r.scaleValue).trim() !== "");
                 return (
                   <div key={s.id} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                     <button
@@ -691,7 +690,7 @@ export default function ReactionCalculator() {
                       <div>
                         <div className="text-sm font-medium text-slate-700">{s.name}</div>
                         <div className="text-xs text-slate-400 mt-0.5">
-                          {s.rows.length} 個試劑{limiting ? ` · 限量試劑：${limiting.name || "（未命名）"}` : ""}
+                          {s.rows.length} 個試劑{limiting ? ` · 用量基準：${limiting.name || "（未命名）"}` : ""}
                           {s.savedAt ? ` · ${new Date(s.savedAt).toLocaleString("zh-TW", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}` : ""}
                         </div>
                       </div>
@@ -712,11 +711,11 @@ export default function ReactionCalculator() {
                               <div className="text-slate-700 truncate">{r.name || "—"}</div>
                               <div className="text-slate-500">{r.mw || "—"}</div>
                               <div className="text-slate-500">
-                                {r.isLimiting ? `${r.scaleValue || "—"} ${r.scaleUnit || "mmol"}` : (r.equivInput || "—")}
+                                {(r.scaleValue && String(r.scaleValue).trim() !== "") ? `${r.scaleValue} ${r.scaleUnit || "mmol"}` : (r.equivInput || "—")}
                               </div>
                               <div>
-                                {r.isLimiting && (
-                                  <span className="text-xs font-medium px-1.5 py-0.5 rounded" style={{ color: ACCENT, backgroundColor: "#EAF2FA" }}>限量試劑</span>
+                                {(r.scaleValue && String(r.scaleValue).trim() !== "") && (
+                                  <span className="text-xs font-medium px-1.5 py-0.5 rounded" style={{ color: ACCENT, backgroundColor: "#EAF2FA" }}>用量基準</span>
                                 )}
                               </div>
                             </div>
@@ -799,7 +798,7 @@ export default function ReactionCalculator() {
               return filtered.map((h) => {
                 const isExpanded = expandedHistoryId === h.id;
                 const confirming = confirmDeleteHistoryId === h.id;
-                const limiting = h.rows.find((r) => r.isLimiting);
+                const limiting = h.rows.find((r) => r.scaleValue && String(r.scaleValue).trim() !== "");
                 return (
                   <div key={h.id} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                     <button
@@ -809,7 +808,7 @@ export default function ReactionCalculator() {
                       <div>
                         <div className="text-sm font-medium text-slate-700">{h.name}</div>
                         <div className="text-xs text-slate-400 mt-0.5">
-                          {h.rows.length} 個試劑{limiting ? ` · 限量試劑：${limiting.name || "（未命名）"}` : ""}
+                          {h.rows.length} 個試劑{limiting ? ` · 用量基準：${limiting.name || "（未命名）"}` : ""}
                           {h.savedAt ? ` · ${formatTimestampLabel(h.savedAt)}` : ""}
                         </div>
                       </div>
@@ -830,11 +829,11 @@ export default function ReactionCalculator() {
                               <div className="text-slate-700 truncate">{r.name || "—"}</div>
                               <div className="text-slate-500">{r.mw || "—"}</div>
                               <div className="text-slate-500">
-                                {r.isLimiting ? `${r.scaleValue || "—"} ${r.scaleUnit || "mmol"}` : (r.equivInput || "—")}
+                                {(r.scaleValue && String(r.scaleValue).trim() !== "") ? `${r.scaleValue} ${r.scaleUnit || "mmol"}` : (r.equivInput || "—")}
                               </div>
                               <div>
-                                {r.isLimiting && (
-                                  <span className="text-xs font-medium px-1.5 py-0.5 rounded" style={{ color: ACCENT, backgroundColor: "#EAF2FA" }}>限量試劑</span>
+                                {(r.scaleValue && String(r.scaleValue).trim() !== "") && (
+                                  <span className="text-xs font-medium px-1.5 py-0.5 rounded" style={{ color: ACCENT, backgroundColor: "#EAF2FA" }}>用量基準</span>
                                 )}
                               </div>
                             </div>
