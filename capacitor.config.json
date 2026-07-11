@@ -1,0 +1,9 @@
+{
+  "appId": "com.yjclab.reactioncalculator",
+  "appName": "反應計算器",
+  "webDir": "dist",
+  "backgroundColor": "#f8fafc",
+  "android": {
+    "backgroundColor": "#f8fafc"
+  }
+}
