@@ -395,6 +395,7 @@ export default function ReactionCalculator() {
   const [recentReagents, setRecentReagents] = useState([]);
 
   const [rows, setRows] = useState([newRow(), newRow(), newRow()]);
+  const [openPickerRowId, setOpenPickerRowId] = useState(null);
   const [savedReactions, setSavedReactions] = useState([]);
   const [currentReactionId, setCurrentReactionId] = useState(null);
   const [reactionNameInput, setReactionNameInput] = useState("");
@@ -855,7 +856,8 @@ export default function ReactionCalculator() {
                 const result = computeRow(row);
                 const isBase = !!referenceRow && row.id === referenceRow.id;
                 return (
-                  <SwipeToDeleteRow key={row.id} onDelete={() => removeRow(row.id)} disabled={rows.length <= 1}>
+                  <div key={row.id} style={{ position: "relative", zIndex: openPickerRowId === row.id ? 50 : "auto" }}>
+                  <SwipeToDeleteRow onDelete={() => removeRow(row.id)} disabled={rows.length <= 1}>
                   <div className={`rounded-lg px-1 py-2 ${isBase ? "bg-sky-50" : "bg-slate-50"}`}>
                     <div className="grid grid-cols-2 gap-2 items-center">
                       {/* name / cas */}
@@ -870,6 +872,7 @@ export default function ReactionCalculator() {
                         }}
                         onNameChange={(v) => updateRow(row.id, { name: v })}
                         placeholder="名稱/代號/CAS"
+                        onOpenChange={(isOpen) => setOpenPickerRowId(isOpen ? row.id : (id) => (id === row.id ? null : id))}
                       />
                       {/* 用量: always editable — whichever row has this filled becomes the reference */}
                       <div className="relative">
@@ -946,6 +949,7 @@ export default function ReactionCalculator() {
                     </div>
                   </div>
                   </SwipeToDeleteRow>
+                  </div>
                 );
               })}
             </div>
@@ -1395,7 +1399,7 @@ function SwipeToDeleteRow({ onDelete, disabled, children }) {
   }
 
   return (
-    <div className="relative overflow-x-hidden rounded-lg">
+    <div className="relative rounded-lg" style={{ clipPath: "inset(-9999px 0)", WebkitClipPath: "inset(-9999px 0)" }}>
       {!disabled && (
         <div className="absolute inset-y-0 right-0 flex" style={{ width: SWIPE_DELETE_WIDTH }}>
           <button
@@ -1422,47 +1426,34 @@ function SwipeToDeleteRow({ onDelete, disabled, children }) {
 
 // ---------- reagent picker with autocomplete ----------
 
-function ReagentPicker({ db, samples = [], recent = [], value, onSelect, onNameChange, placeholder }) {
-  const [open, setOpen] = useState(false);
-  const [anchor, setAnchor] = useState(null);
+function ReagentPicker({ db, samples = [], recent = [], value, onSelect, onNameChange, placeholder, onOpenChange }) {
+  const [open, setOpenRaw] = useState(false);
+  const [openUp, setOpenUp] = useState(false);
   const inputRef = useRef(null);
+
+  function setOpen(val) {
+    setOpenRaw(val);
+    onOpenChange?.(val);
+  }
 
   useEffect(() => {
     if (!open) return;
-    function reposition() {
-      if (inputRef.current) {
-        const r = inputRef.current.getBoundingClientRect();
-        setAnchor({ top: r.bottom + 4, left: r.left, width: r.width });
-      }
+    const LIST_HEIGHT_ESTIMATE = 260;
+    function decideDirection() {
+      if (!inputRef.current) return;
+      const r = inputRef.current.getBoundingClientRect();
+      const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      const spaceBelow = viewportHeight - r.bottom;
+      const spaceAbove = r.top;
+      setOpenUp(spaceBelow < LIST_HEIGHT_ESTIMATE && spaceAbove > spaceBelow);
     }
-    reposition();
-
-    // Scroll should stay snappy — reposition immediately so the list tracks the input.
-    window.addEventListener("scroll", reposition, true);
-
-    // Viewport-size changes (keyboard opening/closing) fire a burst of resize
-    // events during the animation. Debounce these so we reposition once the
-    // keyboard has actually settled, instead of chasing it mid-animation.
-    let debounceTimer = null;
-    function debouncedReposition() {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(reposition, 150);
-    }
+    decideDirection();
     const vv = typeof window !== "undefined" ? window.visualViewport : null;
-    if (vv) {
-      vv.addEventListener("resize", debouncedReposition);
-    } else {
-      window.addEventListener("resize", debouncedReposition);
-    }
-
+    if (vv) vv.addEventListener("resize", decideDirection);
+    window.addEventListener("scroll", decideDirection, true);
     return () => {
-      window.removeEventListener("scroll", reposition, true);
-      if (vv) {
-        vv.removeEventListener("resize", debouncedReposition);
-      } else {
-        window.removeEventListener("resize", debouncedReposition);
-      }
-      if (debounceTimer) clearTimeout(debounceTimer);
+      if (vv) vv.removeEventListener("resize", decideDirection);
+      window.removeEventListener("scroll", decideDirection, true);
     };
   }, [open]);
 
@@ -1496,41 +1487,39 @@ function ReagentPicker({ db, samples = [], recent = [], value, onSelect, onNameC
       <input ref={inputRef} type="text" value={value}
         onChange={(e) => { onNameChange(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
         placeholder={placeholder}
         className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2"
         style={{ "--tw-ring-color": ACCENT }} />
 
-      {open && anchor && (
-        <>
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div
-            className="fixed z-40 bg-white border border-slate-300 rounded-lg shadow-lg overflow-y-auto"
-            style={{ top: anchor.top, left: anchor.left, width: anchor.width, maxHeight: "270px", WebkitOverflowScrolling: "touch" }}
-            onTouchStart={(e) => e.stopPropagation()}
-            onTouchMove={(e) => e.stopPropagation()}
-            onTouchEnd={(e) => e.stopPropagation()}
-          >
-            {options.length === 0 ? (
-              <div className="text-xs text-slate-400 text-center py-4 px-2">
-                {showingRecent || !q ? "尚無最近使用的試劑，開始輸入以搜尋" : "沒有符合的試劑，可直接輸入自訂名稱"}
-              </div>
-            ) : (
-              <>
-                {showingRecent && (
-                  <div className="text-[11px] text-slate-400 px-3 pt-2 pb-1">最近使用</div>
-                )}
-                {options.map((o) => (
-                  <button key={o.id}
-                    onMouseDown={() => { onSelect(o); setOpen(false); }}
-                    className="w-full text-left px-3 py-2 hover:bg-slate-50 flex flex-col gap-0.5 border-b border-slate-50 last:border-b-0">
-                    <span className="text-sm text-slate-700 leading-snug whitespace-normal break-words">{o.name}</span>
-                    <span className="text-xs text-slate-400">MW {o.mw}{o.cas ? ` · CAS ${o.cas}` : ""}</span>
-                  </button>
-                ))}
-              </>
-            )}
-          </div>
-        </>
+      {open && (
+        <div
+          className={`absolute z-30 left-0 w-full bg-white border border-slate-300 rounded-lg shadow-lg overflow-y-auto ${openUp ? "bottom-full mb-1" : "top-full mt-1"}`}
+          style={{ maxHeight: "260px", WebkitOverflowScrolling: "touch" }}
+          onTouchStart={(e) => e.stopPropagation()}
+          onTouchMove={(e) => e.stopPropagation()}
+          onTouchEnd={(e) => e.stopPropagation()}
+        >
+          {options.length === 0 ? (
+            <div className="text-xs text-slate-400 text-center py-4 px-2">
+              {showingRecent || !q ? "尚無最近使用的試劑，開始輸入以搜尋" : "沒有符合的試劑，可直接輸入自訂名稱"}
+            </div>
+          ) : (
+            <>
+              {showingRecent && (
+                <div className="text-[11px] text-slate-400 px-3 pt-2 pb-1">最近使用</div>
+              )}
+              {options.map((o) => (
+                <button key={o.id}
+                  onMouseDown={() => { onSelect(o); setOpen(false); }}
+                  className="w-full text-left px-3 py-2 hover:bg-slate-50 flex flex-col gap-0.5 border-b border-slate-50 last:border-b-0">
+                  <span className="text-sm text-slate-700 leading-snug whitespace-normal break-words">{o.name}</span>
+                  <span className="text-xs text-slate-400">MW {o.mw}{o.cas ? ` · CAS ${o.cas}` : ""}</span>
+                </button>
+              ))}
+            </>
+          )}
+        </div>
       )}
     </div>
   );
