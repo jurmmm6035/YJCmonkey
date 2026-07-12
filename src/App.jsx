@@ -1436,11 +1436,33 @@ function ReagentPicker({ db, samples = [], recent = [], value, onSelect, onNameC
       }
     }
     reposition();
+
+    // Scroll should stay snappy — reposition immediately so the list tracks the input.
     window.addEventListener("scroll", reposition, true);
-    window.addEventListener("resize", reposition);
+
+    // Viewport-size changes (keyboard opening/closing) fire a burst of resize
+    // events during the animation. Debounce these so we reposition once the
+    // keyboard has actually settled, instead of chasing it mid-animation.
+    let debounceTimer = null;
+    function debouncedReposition() {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(reposition, 150);
+    }
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    if (vv) {
+      vv.addEventListener("resize", debouncedReposition);
+    } else {
+      window.addEventListener("resize", debouncedReposition);
+    }
+
     return () => {
       window.removeEventListener("scroll", reposition, true);
-      window.removeEventListener("resize", reposition);
+      if (vv) {
+        vv.removeEventListener("resize", debouncedReposition);
+      } else {
+        window.removeEventListener("resize", debouncedReposition);
+      }
+      if (debounceTimer) clearTimeout(debounceTimer);
     };
   }, [open]);
 
