@@ -2,270 +2,9 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Search, Database, Calculator, Upload, Download, Save, Check, X, AlertCircle, FlaskConical, ChevronDown, List, History } from "lucide-react";
 import "./storage.js"; // installs window.storage backed by localStorage
 import defaultReagentDb from "./default-reagent-db.json"; // bundled 藥冊 snapshot (2025YJC + 2023HSU + 2025YKW), seeded on first launch
+import { reagentMatchesQuery } from "./chemAliases.js"; // 化學式/縮寫搜尋對照表（例如 K2CO3、dppf、TBAF）
 
 const ACCENT = "#185FA5";
-
-// ---------- common formula / abbreviation -> name-keyword aliases ----------
-// Lets someone type "K2CO3" or "Pd(OAc)2" and still find "Potassium carbonate"
-// or "Palladium(II) acetate" in the database, even though the database only
-// stores the formal chemical name (no formula/synonym field). Each alias maps
-// a normalized formula/abbreviation to one or more keywords that must ALL
-// appear in a candidate reagent's name for it to count as a match.
-const CHEM_ALIASES = {
-  // bases
-  k2co3: ["potassium", "carbonat"],
-  na2co3: ["sodium", "carbonat"],
-  cs2co3: ["cesium", "carbonat"],
-  caesiumcarbonate: ["cesium", "carbonat"],
-  naoh: ["sodium", "hydroxide"],
-  koh: ["potassium", "hydroxide"],
-  nahco3: ["sodium", "bicarbonat"],
-  naoac: ["sodium", "acetate"],
-  koac: ["potassium", "acetate"],
-  et3n: ["triethylamine"],
-  tea: ["triethylamine"],
-  dipea: ["diisopropylethylamine"],
-  hunigsbase: ["diisopropylethylamine"],
-  dbu: ["diazabicyclo[5", "undec"],
-  dabco: ["diazabicyclo[2.2.2]octane"],
-  naome: ["sodium", "methoxide"],
-  naoet: ["sodium", "ethoxide"],
-  kotbu: ["potassium", "butoxide"],
-  naotbu: ["sodium", "butoxide"],
-
-  // Pd catalysts / precursors
-  pdoac2: ["palladium", "acetate"],
-  "pd(oac)2": ["palladium", "acetate"],
-  pdcl2: ["palladium", "chloride"],
-  pd2dba3: ["dibenzylideneacetone", "palladium"],
-  pddppfcl2: ["dppf", "palladium"],
-  "pd(dppf)cl2": ["dppf", "palladium"],
-  pdpph34: ["triphenylphosphine", "palladium"],
-  "pd(pph3)4": ["triphenylphosphine", "palladium"],
-
-  // reducing agents
-  nabh4: ["sodium", "borohydride"],
-  libh4: ["lithium", "borohydride"],
-  lialh4: ["lithium", "aluminum", "hydride"],
-  nabh3cn: ["cyanoborohydride"],
-  dibal: ["diisobutylaluminum"],
-  dibalh: ["diisobutylaluminum"],
-
-  // oxidants
-  mcpba: ["chloroperbenzoic"],
-  pcc: ["pyridinium", "chlorochromate"],
-  pdc: ["pyridinium", "dichromate"],
-  dmp: ["dess", "martin"],
-  nbs: ["bromosuccinimide"],
-  ncs: ["chlorosuccinimide"],
-  h2o2: ["hydrogen", "peroxide"],
-
-  // solvents
-  dcm: ["dichloromethane"],
-  thf: ["tetrahydrofuran"],
-  dmf: ["dimethylformamide"],
-  dmso: ["dimethyl", "sulfoxide"],
-  meoh: ["methanol"],
-  etoh: ["ethanol"],
-  etoac: ["ethyl", "acetate"],
-  et2o: ["diethyl", "ether"],
-  mecn: ["acetonitrile"],
-  acn: ["acetonitrile"],
-  dmac: ["dimethylacetamide"],
-  nmp: ["methylpyrrolidone"],
-  tbuoh: ["tert-butanol"],
-  "t-buoh": ["tert-butanol"],
-  iproh: ["isopropanol"],
-  ipa: ["isopropanol"],
-  nbuoh: ["n-butanol"],
-  dme: ["dimethoxyethane"],
-  tfe: ["trifluoroethanol"],
-  phme: ["toluene"],
-  chcl3: ["chloroform"],
-  ccl4: ["carbon", "tetrachloride"],
-  hmpa: ["hexamethylphosphoramide"],
-  dioxane: ["dioxane"],
-  dce: ["dichloroethane"],
-  mtbe: ["methyl", "butyl", "ether"],
-
-  // ligands
-  pph3: ["triphenylphosphine"],
-  binap: ["binaphthyl"],
-  dppf: ["diphenylphosphino", "ferrocene"],
-  dppe: ["diphenylphosphino", "ethane"],
-  dppp: ["diphenylphosphino", "propane"],
-  dppb: ["diphenylphosphino", "butane"],
-  xantphos: ["xantphos"],
-  sphos: ["sphos"],
-  xphos: ["xphos"],
-  ruphos: ["ruphos"],
-  davephos: ["davephos"],
-  johnphos: ["johnphos"],
-  brettphos: ["brettphos"],
-  dpephos: ["dpephos"],
-  josiphos: ["josiphos"],
-  pcy3: ["tricyclohexylphosphine"],
-  "p(tbu)3": ["tri-tert-butylphosphine"],
-  ptbu3: ["tri-tert-butylphosphine"],
-  "p(otol)3": ["tri(o-tolyl)phosphine"],
-  potol3: ["tri(o-tolyl)phosphine"],
-  imes: ["imes"],
-  ipr: ["ipr"],
-  sipr: ["sipr"],
-  dpppent: ["diphenylphosphino", "pentane"],
-
-  // silylating / amine reagents
-  tmscl: ["trimethylsilyl", "chloride"],
-  tbscl: ["butyldimethylsilyl", "chloride"],
-  tmeda: ["tetramethylethylenediamine"],
-
-  // acids
-  hcl: ["hydrochloric"],
-  h2so4: ["sulfuric"],
-  tfa: ["trifluoroacetic"],
-  acoh: ["acetic", "acid"],
-  tsoh: ["toluenesulfonic"],
-
-  // salts / drying agents
-  nacl: ["sodium", "chloride"],
-  mgso4: ["magnesium", "sulfate"],
-  na2so4: ["sodium", "sulfate"],
-  nh4cl: ["ammonium", "chloride"],
-  cacl2: ["calcium", "chloride"],
-  nahso3: ["sodium", "bisulfite"],
-
-  // organometallics
-  nbuli: ["n-butyllithium"],
-  tbuli: ["tert-butyllithium"],
-  sbuli: ["sec-butyllithium"],
-  lda: ["diisopropylamide"],
-
-  // silver salts
-  agno3: ["silver", "nitrate"],
-  agoac: ["silver", "acetate"],
-  ag2o: ["silver", "oxide"],
-  ag2co3: ["silver", "carbonat"],
-  agotf: ["silver", "trifluoromethanesulfonate"],
-  agbf4: ["silver", "tetrafluoroborate"],
-  agf: ["silver", "fluoride"],
-  agcl: ["silver", "chloride"],
-  agsbf6: ["silver", "hexafluoroantimonate"],
-
-  // copper salts
-  cui: ["copper", "iodide"],
-  cubr: ["copper", "bromide"],
-  cucl: ["copper", "chloride"],
-  cucl2: ["copper", "chloride"],
-  cubr2: ["copper", "bromide"],
-  "cu(oac)2": ["copper", "acetate"],
-  cuoac: ["copper", "acetate"],
-  cuotf: ["copper", "trifluoromethanesulfonate"],
-  cuso4: ["copper", "sulfate"],
-  cu2o: ["copper", "oxide"],
-  cucn: ["copper", "cyanide"],
-  cuo: ["copper", "oxide"],
-
-  // ammonium salts (TBAF and relatives)
-  tbaf: ["tetrabutylammonium", "fluoride"],
-  tbab: ["tetrabutylammonium", "bromide"],
-  tbai: ["tetrabutylammonium", "iodide"],
-  tbacl: ["tetrabutylammonium", "chloride"],
-  tbaoh: ["tetrabutylammonium", "hydroxide"],
-  "bu4nf": ["tetrabutylammonium", "fluoride"],
-  tbahso4: ["tetrabutylammonium", "hydrogen", "sulfate"],
-
-  // hexamethyldisilazide bases
-  lihmds: ["lithium", "hexamethyldisilazide"],
-  nahmds: ["sodium", "hexamethyldisilazide"],
-  khmds: ["potassium", "hexamethyldisilazide"],
-
-  // common in Pd-catalyzed C-H functionalization / this lab's chemistry
-  hfip: ["hexafluoroisopropanol"],
-  "2mepy": ["methylpyridine"],
-  "2-mepy": ["methylpyridine"],
-  pivoh: ["pivalic"],
-
-  // other common halide / pseudohalide salts
-  nan3: ["sodium", "azide"],
-  nai: ["sodium", "iodide"],
-  nabr: ["sodium", "bromide"],
-  ki: ["potassium", "iodide"],
-  kbr: ["potassium", "bromide"],
-  licl: ["lithium", "chloride"],
-  libr: ["lithium", "bromide"],
-  lioh: ["lithium", "hydroxide"],
-  mgbr2: ["magnesium", "bromide"],
-  fecl3: ["ferric", "chloride"],
-  fecl2: ["ferrous", "chloride"],
-
-  // nickel salts / precursors
-  nicl2: ["nickel", "chloride"],
-  nibr2: ["nickel", "bromide"],
-  nii2: ["nickel", "iodide"],
-  niso4: ["nickel", "sulfate"],
-  "ni(oac)2": ["nickel", "acetate"],
-  nioac: ["nickel", "acetate"],
-  "ni(acac)2": ["nickel", "acetylacetonate"],
-  niacac: ["nickel", "acetylacetonate"],
-  "ni(cod)2": ["bis(1,5-cyclooctadiene)nickel"],
-  nicod2: ["bis(1,5-cyclooctadiene)nickel"],
-  nio: ["nickel", "oxide"],
-  "nicl2glyme": ["nickel", "chloride", "dimethoxyethane"],
-  "nicl2(dme)": ["nickel", "chloride", "dimethoxyethane"],
-
-  // zinc salts
-  zncl2: ["zinc", "chloride"],
-  znbr2: ["zinc", "bromide"],
-  zni2: ["zinc", "iodide"],
-  "zn(otf)2": ["zinc", "trifluoromethanesulfonate"],
-  znotf2: ["zinc", "trifluoromethanesulfonate"],
-  zno: ["zinc", "oxide"],
-  znso4: ["zinc", "sulfate"],
-  "zn(oac)2": ["zinc", "acetate"],
-  znoac: ["zinc", "acetate"],
-  znco3: ["zinc", "carbonat"],
-  et2zn: ["diethylzinc"],
-  zndust: ["zinc", "dust"],
-
-  // radical initiators / misc oxidants
-  aibn: ["azobisisobutyronitrile"],
-  bpo: ["benzoyl", "peroxide"],
-  tempo: ["tetramethylpiperidin", "oxyl"],
-  ddq: ["dichlorodicyanobenzoquinone"],
-
-  // sulfonic acids / anhydrides
-  tfoh: ["trifluoromethanesulfonic"],
-  tf2o: ["trifluoromethanesulfonic", "anhydride"],
-
-  // coupling reagents
-  edc: ["ethylcarbodiimide"],
-  dcc: ["dicyclohexylcarbodiimide"],
-  hatu: ["hatu"],
-  boc2o: ["di-tert-butyl", "dicarbonate"],
-};
-
-const CHEM_ALIAS_KEYS = Object.keys(CHEM_ALIASES);
-
-function normalizeFormulaQuery(q) {
-  return q.toLowerCase().replace(/[\s,]/g, "");
-}
-
-// Returns the set of name-keyword-lists whose alias key starts with the
-// (normalized) query — e.g. typing just "k" already matches "k2co3", "koh",
-// "koac", "kotbu", so suggestions appear before the full formula is typed.
-function matchingAliasKeywordSets(query) {
-  const norm = normalizeFormulaQuery(query);
-  if (!norm) return [];
-  return CHEM_ALIAS_KEYS.filter((key) => key.startsWith(norm)).map((key) => CHEM_ALIASES[key]);
-}
-
-// True if `name` satisfies at least one of the alias keyword-lists matching the query.
-function matchesChemAlias(query, name) {
-  const keywordSets = matchingAliasKeywordSets(query);
-  if (keywordSets.length === 0) return false;
-  const lowerName = name.toLowerCase();
-  return keywordSets.some((keywords) => keywords.every((kw) => lowerName.includes(kw)));
-}
 
 // ---------- helpers ----------
 
@@ -371,31 +110,11 @@ function computeBaseMmol(row) {
 
 export default function ReactionCalculator() {
   const [tab, setTab] = useState("calc");
-  const [keyboardOpen, setKeyboardOpen] = useState(false);
-
-  // Detect the on-screen keyboard on mobile by watching visualViewport shrink.
-  // When the keyboard covers a big chunk of the screen, hide the bottom nav so
-  // it doesn't get shoved up into the middle of the layout.
-  useEffect(() => {
-    const vv = typeof window !== "undefined" ? window.visualViewport : null;
-    if (!vv) return;
-    function onResize() {
-      // If the visible viewport is noticeably shorter than the window, a keyboard
-      // (or similar overlay) is likely open.
-      const shrunk = window.innerHeight - vv.height > 150;
-      setKeyboardOpen(shrunk);
-    }
-    vv.addEventListener("resize", onResize);
-    onResize();
-    return () => vv.removeEventListener("resize", onResize);
-  }, []);
   const [db, setDb] = useState([]);
   const [dbLoaded, setDbLoaded] = useState(false);
   const [sampleCompounds, setSampleCompounds] = useState([]);
-  const [recentReagents, setRecentReagents] = useState([]);
 
   const [rows, setRows] = useState([newRow(), newRow(), newRow()]);
-  const [openPickerRowId, setOpenPickerRowId] = useState(null);
   const [savedReactions, setSavedReactions] = useState([]);
   const [currentReactionId, setCurrentReactionId] = useState(null);
   const [reactionNameInput, setReactionNameInput] = useState("");
@@ -447,10 +166,6 @@ export default function ReactionCalculator() {
         const res4 = await window.storage.get("calc-history", false);
         if (res4 && res4.value) setHistoryEntries(JSON.parse(res4.value));
       } catch (e) {}
-      try {
-        const res5 = await window.storage.get("recent-reagents", false);
-        if (res5 && res5.value) setRecentReagents(JSON.parse(res5.value));
-      } catch (e) {}
       setDbLoaded(true);
     })();
   }, []);
@@ -459,19 +174,6 @@ export default function ReactionCalculator() {
     setDb(next);
     try { await window.storage.set("reagent-db", JSON.stringify(next), false); }
     catch (e) { console.error("Failed to save reagent database", e); }
-  }
-
-  async function persistRecentReagents(next) {
-    setRecentReagents(next);
-    try { await window.storage.set("recent-reagents", JSON.stringify(next), false); }
-    catch (e) { console.error("Failed to save recent reagents", e); }
-  }
-  function recordReagentUse(entry) {
-    if (!entry || !entry.name) return;
-    const key = (entry.cas || entry.name).toLowerCase();
-    const filtered = recentReagents.filter((r) => (r.cas || r.name).toLowerCase() !== key);
-    const next = [{ name: entry.name, cas: entry.cas || "", mw: entry.mw }, ...filtered].slice(0, 15);
-    persistRecentReagents(next);
   }
 
   async function persistSamples(next) {
@@ -730,13 +432,9 @@ export default function ReactionCalculator() {
     setEditingDbId(null);
   }
   const filteredDb = useMemo(() => {
-    const q = dbFilter.trim().toLowerCase();
+    const q = dbFilter.trim();
     if (!q) return db;
-    return db.filter((d) =>
-      d.name.toLowerCase().includes(q) ||
-      String(d.cas || "").toLowerCase().includes(q) ||
-      String(d.location || "").toLowerCase().includes(q)
-    );
+    return db.filter((d) => reagentMatchesQuery(d, q, ["location"]));
   }, [db, dbFilter]);
 
   const inputCls = "w-full border border-slate-200 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2";
@@ -759,7 +457,7 @@ export default function ReactionCalculator() {
         </div>
 
         {/* scrollable content */}
-        <div className={`flex-1 overflow-y-auto ${keyboardOpen ? "pb-4" : "pb-20"}`}>
+        <div className="flex-1 overflow-y-auto pb-20">
 
         {tab === "calc" && (
         <div className="px-4 py-4">
@@ -856,23 +554,17 @@ export default function ReactionCalculator() {
                 const result = computeRow(row);
                 const isBase = !!referenceRow && row.id === referenceRow.id;
                 return (
-                  <div key={row.id} style={{ position: "relative", zIndex: openPickerRowId === row.id ? 50 : "auto" }}>
-                  <SwipeToDeleteRow onDelete={() => removeRow(row.id)} disabled={rows.length <= 1}>
+                  <SwipeToDeleteRow key={row.id} onDelete={() => removeRow(row.id)} disabled={rows.length <= 1}>
                   <div className={`rounded-lg px-1 py-2 ${isBase ? "bg-sky-50" : "bg-slate-50"}`}>
                     <div className="grid grid-cols-2 gap-2 items-center">
                       {/* name / cas */}
                       <ReagentPicker
                         db={db}
                         samples={sampleCompounds}
-                        recent={recentReagents}
                         value={row.name}
-                        onSelect={(entry) => {
-                          updateRow(row.id, { name: entry.name, cas: entry.cas || "", mw: String(entry.mw) });
-                          if (!entry.id || !String(entry.id).startsWith("sample-")) recordReagentUse(entry);
-                        }}
+                        onSelect={(entry) => updateRow(row.id, { name: entry.name, cas: entry.cas || "", mw: String(entry.mw) })}
                         onNameChange={(v) => updateRow(row.id, { name: v })}
                         placeholder="名稱/代號/CAS"
-                        onOpenChange={(isOpen) => setOpenPickerRowId(isOpen ? row.id : (id) => (id === row.id ? null : id))}
                       />
                       {/* 用量: always editable — whichever row has this filled becomes the reference */}
                       <div className="relative">
@@ -949,7 +641,6 @@ export default function ReactionCalculator() {
                     </div>
                   </div>
                   </SwipeToDeleteRow>
-                  </div>
                 );
               })}
             </div>
@@ -1332,8 +1023,7 @@ export default function ReactionCalculator() {
         </div>
         {/* end scrollable content */}
 
-        {/* bottom nav — hidden while typing (keyboard open) to keep the layout clean */}
-        {!keyboardOpen && (
+        {/* bottom nav */}
         <div className="absolute bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex items-stretch px-1 pt-1.5 shrink-0" style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}>
           <button onClick={() => setTab("calc")}
             className="flex-1 flex flex-col items-center gap-0.5 py-1 rounded-lg text-[11px] font-medium"
@@ -1360,7 +1050,6 @@ export default function ReactionCalculator() {
             紀錄
           </button>
         </div>
-        )}
       </div>
     </div>
   );
@@ -1399,7 +1088,7 @@ function SwipeToDeleteRow({ onDelete, disabled, children }) {
   }
 
   return (
-    <div className="relative rounded-lg" style={{ clipPath: "inset(-9999px 0)", WebkitClipPath: "inset(-9999px 0)" }}>
+    <div className="relative overflow-x-hidden rounded-lg">
       {!disabled && (
         <div className="absolute inset-y-0 right-0 flex" style={{ width: SWIPE_DELETE_WIDTH }}>
           <button
@@ -1426,100 +1115,74 @@ function SwipeToDeleteRow({ onDelete, disabled, children }) {
 
 // ---------- reagent picker with autocomplete ----------
 
-function ReagentPicker({ db, samples = [], recent = [], value, onSelect, onNameChange, placeholder, onOpenChange }) {
-  const [open, setOpenRaw] = useState(false);
-  const [openUp, setOpenUp] = useState(false);
+function ReagentPicker({ db, samples = [], value, onSelect, onNameChange, placeholder }) {
+  const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState(null);
   const inputRef = useRef(null);
-
-  function setOpen(val) {
-    setOpenRaw(val);
-    onOpenChange?.(val);
-  }
 
   useEffect(() => {
     if (!open) return;
-    const LIST_HEIGHT_ESTIMATE = 260;
-    function decideDirection() {
-      if (!inputRef.current) return;
-      const r = inputRef.current.getBoundingClientRect();
-      const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-      const spaceBelow = viewportHeight - r.bottom;
-      const spaceAbove = r.top;
-      setOpenUp(spaceBelow < LIST_HEIGHT_ESTIMATE && spaceAbove > spaceBelow);
+    function reposition() {
+      if (inputRef.current) {
+        const r = inputRef.current.getBoundingClientRect();
+        setAnchor({ top: r.bottom + 4, left: r.left, width: r.width });
+      }
     }
-    decideDirection();
-    const vv = typeof window !== "undefined" ? window.visualViewport : null;
-    if (vv) vv.addEventListener("resize", decideDirection);
-    window.addEventListener("scroll", decideDirection, true);
+    reposition();
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
     return () => {
-      if (vv) vv.removeEventListener("resize", decideDirection);
-      window.removeEventListener("scroll", decideDirection, true);
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
     };
   }, [open]);
 
-  const trimmedValue = value.trim();
-  const q = trimmedValue.toLowerCase();
-  const showingRecent = !q && recent.length > 0;
-
   const options = useMemo(() => {
-    const aliasMatches = q ? db.filter((d) => matchesChemAlias(trimmedValue, d.name)) : [];
-    const aliasIds = new Set(aliasMatches.map((d) => d.id));
-    const directMatches = q
-      ? db.filter((d) => !aliasIds.has(d.id) && (d.name.toLowerCase().includes(q) || String(d.cas || "").toLowerCase().includes(q)))
-      : [];
-    let dbMatches;
-    if (!q) {
-      // Nothing typed yet: show recently-used reagents instead of an arbitrary
-      // slice of the whole (possibly thousands-strong) database.
-      dbMatches = recent.map((r) => ({ id: `recent-${(r.cas || r.name).toLowerCase()}`, name: r.name, cas: r.cas || "", mw: r.mw }));
-    } else {
-      dbMatches = [...aliasMatches, ...directMatches].slice(0, 15).map((d) => ({ ...d }));
-    }
+    const q = value.trim().toLowerCase();
+    const dbMatches = db
+      .filter((d) => reagentMatchesQuery(d, value))
+      .slice(0, 15)
+      .map((d) => ({ ...d }));
     const sampleMatches = samples
       .filter((s) => !q || s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q))
       .slice(0, 6)
       .map((s) => ({ id: `sample-${s.code}`, name: s.code === s.name ? s.code : `${s.code} — ${s.name}`, mw: s.mw, cas: "" }));
     return [...sampleMatches, ...dbMatches];
-  }, [db, samples, recent, q, trimmedValue]);
+  }, [db, samples, value]);
 
   return (
     <div className="relative">
       <input ref={inputRef} type="text" value={value}
         onChange={(e) => { onNameChange(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
         placeholder={placeholder}
         className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2"
         style={{ "--tw-ring-color": ACCENT }} />
 
-      {open && (
-        <div
-          className={`absolute z-30 left-0 w-full bg-white border border-slate-300 rounded-lg shadow-lg overflow-y-auto ${openUp ? "bottom-full mb-1" : "top-full mt-1"}`}
-          style={{ maxHeight: "260px", WebkitOverflowScrolling: "touch" }}
-          onTouchStart={(e) => e.stopPropagation()}
-          onTouchMove={(e) => e.stopPropagation()}
-          onTouchEnd={(e) => e.stopPropagation()}
-        >
-          {options.length === 0 ? (
-            <div className="text-xs text-slate-400 text-center py-4 px-2">
-              {showingRecent || !q ? "尚無最近使用的試劑，開始輸入以搜尋" : "沒有符合的試劑，可直接輸入自訂名稱"}
-            </div>
-          ) : (
-            <>
-              {showingRecent && (
-                <div className="text-[11px] text-slate-400 px-3 pt-2 pb-1">最近使用</div>
-              )}
-              {options.map((o) => (
+      {open && anchor && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div
+            className="fixed z-40 bg-white border border-slate-300 rounded-lg shadow-lg overflow-y-auto"
+            style={{ top: anchor.top, left: anchor.left, width: anchor.width, maxHeight: "270px", WebkitOverflowScrolling: "touch" }}
+            onTouchStart={(e) => e.stopPropagation()}
+            onTouchMove={(e) => e.stopPropagation()}
+            onTouchEnd={(e) => e.stopPropagation()}
+          >
+            {options.length === 0 ? (
+              <div className="text-xs text-slate-400 text-center py-4 px-2">沒有符合的試劑，可直接輸入自訂名稱</div>
+            ) : (
+              options.map((o) => (
                 <button key={o.id}
                   onMouseDown={() => { onSelect(o); setOpen(false); }}
                   className="w-full text-left px-3 py-2 hover:bg-slate-50 flex flex-col gap-0.5 border-b border-slate-50 last:border-b-0">
                   <span className="text-sm text-slate-700 leading-snug whitespace-normal break-words">{o.name}</span>
                   <span className="text-xs text-slate-400">MW {o.mw}{o.cas ? ` · CAS ${o.cas}` : ""}</span>
                 </button>
-              ))}
-            </>
-          )}
-        </div>
+              ))
+            )}
+          </div>
+        </>
       )}
     </div>
   );
