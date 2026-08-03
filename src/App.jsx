@@ -132,6 +132,16 @@ export default function ReactionCalculator() {
   const [importMsg, setImportMsg] = useState(null);
   const fileInputRef = useRef(null);
 
+  // ---- 底部提示條（toast）：所有存檔動作共用的操作回饋 ----
+  const [toast, setToast] = useState(null);
+  const toastTimerRef = useRef(null);
+  function showToast(text, type = "success") {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast({ text, type, key: Date.now() });
+    toastTimerRef.current = setTimeout(() => setToast(null), 2200);
+  }
+  useEffect(() => () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }, []);
+
   useEffect(() => {
     (async () => {
       let loadedDb = false;
@@ -192,21 +202,39 @@ export default function ReactionCalculator() {
     return rows.map((r) => ({ ...r, id: uid() }));
   }
 
+  // 反應名稱重複時，先要求確認再另存一筆（避免不小心存出兩筆同名反應）
+  const [confirmDupReaction, setConfirmDupReaction] = useState(false);
+
   async function saveReactionAsNew() {
     const name = reactionNameInput.trim();
-    if (!name) return;
+    if (!name) {
+      showToast("請先輸入反應名稱", "error");
+      return false;
+    }
+    const dup = savedReactions.some((s) => s.name.trim().toLowerCase() === name.toLowerCase());
+    if (dup && !confirmDupReaction) {
+      // 第一次按：先跳出確認，不寫入
+      setConfirmDupReaction(true);
+      return false;
+    }
     const entry = { id: uid(), name, savedAt: Date.now(), rows: cloneRowsForSave() };
     await persistSavedReactions([...savedReactions, entry]);
     setCurrentReactionId(entry.id);
+    setConfirmDupReaction(false);
+    showToast(dup ? `已另存一筆同名反應「${name}」` : `已儲存反應「${name}」`);
+    return true;
   }
 
   async function updateCurrentReaction() {
-    if (!currentReactionId) return;
+    if (!currentReactionId) return false;
     const name = reactionNameInput.trim();
     const next = savedReactions.map((s) =>
       s.id === currentReactionId ? { ...s, name: name || s.name, rows: cloneRowsForSave(), savedAt: Date.now() } : s
     );
     await persistSavedReactions(next);
+    const finalName = name || savedReactions.find((s) => s.id === currentReactionId)?.name || "";
+    showToast(`已更新反應「${finalName}」`);
+    return true;
   }
 
   function loadReaction(id) {
@@ -235,6 +263,8 @@ export default function ReactionCalculator() {
     const name = reactionNameInput.trim() || formatTimestampLabel(Date.now());
     const entry = { id: uid(), name, savedAt: Date.now(), rows: cloneRowsForSave() };
     await persistHistory([entry, ...historyEntries]);
+    showToast(`已記錄「${name}」到歷史紀錄`);
+    return true;
   }
 
   async function deleteHistoryEntry(id) {
@@ -300,12 +330,39 @@ export default function ReactionCalculator() {
     return { mmol, mass: mmol * mw, isPercent: parsed.isPercent };
   }
 
-  async function saveSampleCompound(row) {
-    if (!row.sampleCode || !row.name || !row.mw) return;
+  // 代號已存在時，先要求確認再覆蓋（避免不知情地蓋掉舊資料）
+  const [confirmOverwriteRowId, setConfirmOverwriteRowId] = useState(null);
+
+  // 實際寫入樣品化合物。回傳 true 表示有成功寫入。
+  async function commitSampleCompound(row) {
     const mw = parseFloat(row.mw);
-    if (isNaN(mw)) return;
     const filtered = sampleCompounds.filter((s) => s.code.toLowerCase() !== row.sampleCode.toLowerCase());
     await persistSamples([...filtered, { code: row.sampleCode, name: row.name, mw }]);
+    return true;
+  }
+
+  // 按下「儲存」時的流程：驗證 → 若代號重複則先要求確認 → 寫入並回饋。
+  // 回傳 false 代表這次沒有真的存檔（讓按鈕不要顯示「已儲存」）。
+  async function saveSampleCompound(row) {
+    if (!row.sampleCode || !row.name || !row.mw) {
+      showToast("請先填好名稱、分子量與樣品代號", "error");
+      return false;
+    }
+    const mw = parseFloat(row.mw);
+    if (isNaN(mw)) {
+      showToast("分子量格式不正確", "error");
+      return false;
+    }
+    const exists = sampleCompounds.some((s) => s.code.toLowerCase() === row.sampleCode.toLowerCase());
+    if (exists && confirmOverwriteRowId !== row.id) {
+      // 第一次按：先跳出確認，不寫入
+      setConfirmOverwriteRowId(row.id);
+      return false;
+    }
+    await commitSampleCompound(row);
+    setConfirmOverwriteRowId(null);
+    showToast(exists ? `已更新樣品「${row.sampleCode}」` : `已儲存樣品「${row.sampleCode}」`);
+    return true;
   }
   async function deleteSampleCompound(code) {
     await persistSamples(sampleCompounds.filter((s) => s.code !== code));
@@ -363,6 +420,7 @@ export default function ReactionCalculator() {
     }
     await persistDb(next);
     setImportMsg({ type: "success", text: `匯入完成：新增 ${added} 筆，更新 ${updated} 筆` });
+    showToast(`匯入完成：新增 ${added} 筆，更新 ${updated} 筆`);
     e.target.value = "";
   }
 
@@ -373,12 +431,17 @@ export default function ReactionCalculator() {
     const a = document.createElement("a");
     a.href = url; a.download = "reagent-database.csv"; a.click();
     URL.revokeObjectURL(url);
+    showToast(`已匯出 ${db.length} 筆試劑為 CSV`);
+    return true;
   }
 
   const [newEntry, setNewEntry] = useState({ name: "", cas: "", mw: "", location: "" });
   async function addDbEntry() {
     const mw = parseFloat(newEntry.mw);
-    if (!newEntry.name || isNaN(mw)) return;
+    if (!newEntry.name || isNaN(mw)) {
+      showToast("請先填好名稱與分子量", "error");
+      return false;
+    }
     const cas = newEntry.cas.trim();
     const location = newEntry.location.trim();
     const key = cas.toLowerCase();
@@ -391,7 +454,9 @@ export default function ReactionCalculator() {
       next = [...db, { id: uid(), name: newEntry.name, cas, mw, location }];
     }
     await persistDb(next);
+    showToast(existingIdx >= 0 ? `已更新「${newEntry.name}」（CAS 相符）` : `已新增「${newEntry.name}」到資料庫`);
     setNewEntry({ name: "", cas: "", mw: "", location: "" });
+    return true;
   }
   async function deleteDbEntry(id) { await persistDb(db.filter((d) => d.id !== id)); }
   async function updateDbEntry(id, patch) {
@@ -413,9 +478,14 @@ export default function ReactionCalculator() {
   }
   async function saveEditSample(code) {
     const mw = parseFloat(sampleEditBuffer.mw);
-    if (!sampleEditBuffer.name.trim() || isNaN(mw)) return;
+    if (!sampleEditBuffer.name.trim() || isNaN(mw)) {
+      showToast("請填好名稱與分子量", "error");
+      return false;
+    }
     await updateSampleCompound(code, { name: sampleEditBuffer.name.trim(), mw });
     setEditingSampleCode(null);
+    showToast(`已更新樣品「${code}」`);
+    return true;
   }
 
   function startEditDbEntry(d) {
@@ -427,9 +497,15 @@ export default function ReactionCalculator() {
   }
   async function saveEditDbEntry(id) {
     const mw = parseFloat(editBuffer.mw);
-    if (!editBuffer.name.trim() || isNaN(mw)) return;
-    await updateDbEntry(id, { name: editBuffer.name.trim(), cas: editBuffer.cas.trim(), mw, location: editBuffer.location.trim() });
+    if (!editBuffer.name.trim() || isNaN(mw)) {
+      showToast("請填好名稱與分子量", "error");
+      return false;
+    }
+    const name = editBuffer.name.trim();
+    await updateDbEntry(id, { name, cas: editBuffer.cas.trim(), mw, location: editBuffer.location.trim() });
     setEditingDbId(null);
+    showToast(`已更新「${name}」`);
+    return true;
   }
   const filteredDb = useMemo(() => {
     return filterReagents(db, dbFilter, ["location"]);
@@ -504,27 +580,41 @@ export default function ReactionCalculator() {
               <input
                 type="text"
                 value={reactionNameInput}
-                onChange={(e) => setReactionNameInput(e.target.value)}
+                onChange={(e) => { setReactionNameInput(e.target.value); setConfirmDupReaction(false); }}
                 placeholder="輸入反應名稱，例如：Pd-catalyzed C–H arylation model"
                 className="border border-slate-200 rounded-lg px-3 py-2 text-sm flex-1 min-w-[180px] focus:outline-none focus:ring-2"
                 style={ringStyle}
               />
               {currentReactionId && (
-                <button onClick={updateCurrentReaction}
+                <ActionButton onAction={updateCurrentReaction} doneLabel="已更新"
                   className="text-sm px-3 py-2 rounded-lg text-white flex items-center gap-1.5 whitespace-nowrap" style={{ backgroundColor: ACCENT }}>
                   <Save size={14} /> 更新目前反應
-                </button>
+                </ActionButton>
               )}
-              <button onClick={saveReactionAsNew} disabled={!reactionNameInput.trim()}
-                className="text-sm px-3 py-2 rounded-lg border disabled:opacity-30 flex items-center gap-1.5 whitespace-nowrap"
-                style={{ borderColor: ACCENT, color: ACCENT }}>
-                <Save size={14} /> 另存為新反應
-              </button>
-              <button onClick={logCurrentCalculation}
+              {confirmDupReaction ? (
+                <div className="flex items-center gap-2 whitespace-nowrap">
+                  <span className="text-xs text-amber-600">已有同名反應，仍要另存一筆？</span>
+                  <ActionButton onAction={saveReactionAsNew} doneLabel="已另存"
+                    className="text-sm px-3 py-2 rounded-lg text-white bg-amber-500 flex items-center gap-1.5 whitespace-nowrap">
+                    <Check size={14} /> 仍要另存
+                  </ActionButton>
+                  <button onClick={() => setConfirmDupReaction(false)}
+                    className="text-sm px-3 py-2 rounded-lg border border-slate-200 text-slate-500 flex items-center gap-1.5 whitespace-nowrap">
+                    <X size={14} /> 取消
+                  </button>
+                </div>
+              ) : (
+                <ActionButton onAction={saveReactionAsNew} doneLabel="已儲存" disabled={!reactionNameInput.trim()}
+                  className="text-sm px-3 py-2 rounded-lg border disabled:opacity-30 flex items-center gap-1.5 whitespace-nowrap"
+                  style={{ borderColor: ACCENT, color: ACCENT }}>
+                  <Save size={14} /> 另存為新反應
+                </ActionButton>
+              )}
+              <ActionButton onAction={logCurrentCalculation} doneLabel="已記錄"
                 className="text-sm px-3 py-2 rounded-lg border border-slate-200 text-slate-500 flex items-center gap-1.5 whitespace-nowrap"
                 title="記錄這次計算到歷史紀錄，未命名則以時間標示">
                 <History size={14} /> 記錄本次計算
-              </button>
+              </ActionButton>
               {confirmClearCalc ? (
                 <div className="flex items-center gap-2 whitespace-nowrap">
                   <span className="text-xs text-slate-400">清除目前輸入？</span>
@@ -621,15 +711,37 @@ export default function ReactionCalculator() {
                         {row.remember && (
                           <>
                             <input type="text" value={row.sampleCode}
-                              onChange={(e) => updateRow(row.id, { sampleCode: e.target.value })}
+                              onChange={(e) => { updateRow(row.id, { sampleCode: e.target.value }); setConfirmOverwriteRowId(null); }}
                               placeholder="樣品代號"
                               className="border border-slate-200 rounded-lg px-2 py-1 text-xs w-24 focus:outline-none focus:ring-2" style={ringStyle} />
-                            <button onClick={() => saveSampleCompound(row)}
-                              disabled={!row.sampleCode || !row.name || !row.mw}
-                              className="text-xs px-2 py-1 rounded-lg text-white disabled:opacity-30 flex items-center gap-1"
-                              style={{ backgroundColor: ACCENT }}>
-                              <Save size={12} /> 儲存
-                            </button>
+                            {confirmOverwriteRowId === row.id ? (
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-xs text-amber-600">代號已存在，覆蓋？</span>
+                                <ActionButton
+                                  onAction={() => saveSampleCompound(row)}
+                                  doneLabel="已更新"
+                                  doneIcon={<Check size={12} />}
+                                  className="text-xs px-2 py-1 rounded-lg text-white flex items-center gap-1 bg-amber-500"
+                                >
+                                  <Check size={12} /> 覆蓋
+                                </ActionButton>
+                                <button onClick={() => setConfirmOverwriteRowId(null)}
+                                  className="text-xs px-2 py-1 rounded-lg border border-slate-200 text-slate-500 flex items-center gap-1">
+                                  <X size={12} /> 取消
+                                </button>
+                              </div>
+                            ) : (
+                              <ActionButton
+                                onAction={() => saveSampleCompound(row)}
+                                doneLabel="已儲存"
+                                doneIcon={<Check size={12} />}
+                                disabled={!row.sampleCode || !row.name || !row.mw}
+                                className="text-xs px-2 py-1 rounded-lg text-white disabled:opacity-30 flex items-center gap-1"
+                                style={{ backgroundColor: ACCENT }}
+                              >
+                                <Save size={12} /> 儲存
+                              </ActionButton>
+                            )}
                           </>
                         )}
                         {isBase && (
@@ -877,9 +989,10 @@ export default function ReactionCalculator() {
               <button onClick={handleImportClick} className="text-sm px-3 py-2 rounded-lg text-white flex items-center gap-1.5" style={{ backgroundColor: ACCENT }}>
                 <Upload size={14} /> 匯入 CSV / JSON
               </button>
-              <button onClick={exportDb} className="text-sm px-3 py-2 rounded-lg border border-slate-200 text-slate-600 flex items-center gap-1.5">
+              <ActionButton onAction={exportDb} doneLabel="已匯出"
+                className="text-sm px-3 py-2 rounded-lg border border-slate-200 text-slate-600 flex items-center gap-1.5">
                 <Download size={14} /> 匯出 CSV
-              </button>
+              </ActionButton>
             </div>
             <div className="text-xs text-slate-400 mt-2">
               CSV 欄位需含 name（名稱）、cas（可省略）、mw（分子量），可另外加 location（位置，選填）。CAS 相符會覆蓋更新，沒有 CAS 則用名稱比對。
@@ -900,10 +1013,10 @@ export default function ReactionCalculator() {
               <input type="text" inputMode="decimal" value={newEntry.mw} onChange={(e) => setNewEntry((n) => ({ ...n, mw: e.target.value }))} placeholder="MW" className={inputCls} style={ringStyle} />
               <input type="text" value={newEntry.location} onChange={(e) => setNewEntry((n) => ({ ...n, location: e.target.value }))} placeholder="位置（選填，如 鄭家-A1-1）" className={inputCls} style={ringStyle} />
             </div>
-            <button onClick={addDbEntry} disabled={!newEntry.name || !newEntry.mw}
+            <ActionButton onAction={addDbEntry} doneLabel="已新增" disabled={!newEntry.name || !newEntry.mw}
               className="mt-2 text-sm px-3 py-2 rounded-lg text-white disabled:opacity-30 flex items-center gap-1.5" style={{ backgroundColor: ACCENT }}>
               <Plus size={14} /> 新增
-            </button>
+            </ActionButton>
           </div>
 
           {sampleCompounds.length > 0 && (
@@ -1021,6 +1134,26 @@ export default function ReactionCalculator() {
         </div>
         {/* end scrollable content */}
 
+        {/* toast：操作回饋提示條，浮在底部導覽列上方 */}
+        {toast && (
+          <div
+            key={toast.key}
+            className="absolute left-0 right-0 flex justify-center px-4 pointer-events-none z-50"
+            style={{ bottom: "calc(4.25rem + env(safe-area-inset-bottom))" }}
+          >
+            <div
+              className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl shadow-lg text-sm font-medium max-w-full ${
+                toast.type === "error" ? "bg-red-600 text-white" : "bg-slate-800 text-white"
+              }`}
+              style={{ animation: "toastIn 0.18s ease-out" }}
+            >
+              {toast.type === "error" ? <AlertCircle size={16} className="shrink-0" /> : <Check size={16} className="shrink-0" />}
+              <span className="leading-snug break-words">{toast.text}</span>
+            </div>
+          </div>
+        )}
+        <style>{`@keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }`}</style>
+
         {/* bottom nav */}
         <div className="absolute bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex items-stretch px-1 pt-1.5 shrink-0" style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}>
           <button onClick={() => setTab("calc")}
@@ -1050,6 +1183,43 @@ export default function ReactionCalculator() {
         </div>
       </div>
     </div>
+  );
+}
+
+// ---------- 按下後短暫顯示「已完成」狀態的按鈕 ----------
+// onAction 可回傳 false 代表「這次沒有真的執行」（例如驗證未通過、或跳出確認流程），
+// 此時不顯示成功狀態，避免誤導。
+function ActionButton({ onAction, doneLabel = "已儲存", doneIcon, children, className, style, disabled, title }) {
+  const [done, setDone] = useState(false);
+  const timerRef = useRef(null);
+
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+
+  async function handleClick() {
+    const result = await onAction?.();
+    if (result === false) return;
+    setDone(true);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setDone(false), 1500);
+  }
+
+  return (
+    <button
+      onClick={handleClick}
+      disabled={disabled}
+      title={title}
+      className={className}
+      style={done ? { ...style, backgroundColor: "#16a34a", borderColor: "#16a34a", color: "#fff" } : style}
+    >
+      {done ? (
+        <>
+          {doneIcon ?? <Check size={14} />}
+          {doneLabel}
+        </>
+      ) : (
+        children
+      )}
+    </button>
   );
 }
 
