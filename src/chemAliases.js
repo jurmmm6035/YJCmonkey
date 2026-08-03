@@ -292,6 +292,11 @@ export function expandChemAliasKeywords(rawQuery) {
 /**
  * 判斷一筆試劑資料是否符合搜尋字串：先比對名稱/CAS（及選用的其他欄位）的子字串，
  * 再比對化學式/縮寫對照表展開出的英文關鍵字。
+ *
+ * 注意：這個函式內部會重新掃一次整份 CHEM_ALIASES 對照表來展開關鍵字。
+ * 對「單一試劑」判斷沒問題，但如果要對一整份資料庫（上千筆）逐筆呼叫，
+ * 等於每一筆都重掃一次對照表，會是 O(資料庫筆數 × 對照表筆數)，在大資料庫上會明顯卡頓。
+ * 批次過濾一整份清單時請改用下面的 filterReagents()，只展開一次關鍵字再重複使用。
  */
 export function reagentMatchesQuery(entry, rawQuery, extraFields = []) {
   const q = String(rawQuery || "").trim().toLowerCase();
@@ -312,4 +317,28 @@ export function reagentMatchesQuery(entry, rawQuery, extraFields = []) {
   }
 
   return false;
+}
+
+/**
+ * 批次過濾一整份試劑清單。只展開一次化學式/縮寫關鍵字（O(對照表筆數)），
+ * 而不是每一筆試劑都重新展開一次，避免資料庫筆數一多就明顯卡頓。
+ */
+export function filterReagents(list, rawQuery, extraFields = []) {
+  const q = String(rawQuery || "").trim().toLowerCase();
+  if (!q) return list;
+
+  const aliasKeywords = expandChemAliasKeywords(q);
+
+  return list.filter((entry) => {
+    const name = String(entry?.name || "").toLowerCase();
+    if (name.includes(q)) return true;
+    if (String(entry?.cas || "").toLowerCase().includes(q)) return true;
+    for (const field of extraFields) {
+      if (String(entry?.[field] || "").toLowerCase().includes(q)) return true;
+    }
+    for (const keyword of aliasKeywords) {
+      if (name.includes(keyword)) return true;
+    }
+    return false;
+  });
 }

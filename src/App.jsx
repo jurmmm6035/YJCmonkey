@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Search, Database, Calculator, Upload, Download, Save, Check, X, AlertCircle, FlaskConical, ChevronDown, List, History } from "lucide-react";
 import "./storage.js"; // installs window.storage backed by localStorage
 import defaultReagentDb from "./default-reagent-db.json"; // bundled 藥冊 snapshot (2025YJC + 2023HSU + 2025YKW), seeded on first launch
-import { reagentMatchesQuery } from "./chemAliases.js"; // 化學式/縮寫搜尋對照表（例如 K2CO3、dppf、TBAF）
+import { filterReagents } from "./chemAliases.js"; // 化學式/縮寫搜尋對照表（例如 K2CO3、dppf、TBAF）
 
 const ACCENT = "#185FA5";
 
@@ -432,9 +432,7 @@ export default function ReactionCalculator() {
     setEditingDbId(null);
   }
   const filteredDb = useMemo(() => {
-    const q = dbFilter.trim();
-    if (!q) return db;
-    return db.filter((d) => reagentMatchesQuery(d, q, ["location"]));
+    return filterReagents(db, dbFilter, ["location"]);
   }, [db, dbFilter]);
 
   const inputCls = "w-full border border-slate-200 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2";
@@ -1139,8 +1137,7 @@ function ReagentPicker({ db, samples = [], value, onSelect, onNameChange, placeh
 
   const options = useMemo(() => {
     const q = value.trim().toLowerCase();
-    const dbMatches = db
-      .filter((d) => reagentMatchesQuery(d, value))
+    const dbMatches = filterReagents(db, value)
       .slice(0, 15)
       .map((d) => ({ ...d }));
     const sampleMatches = samples
