@@ -910,7 +910,7 @@ export default function ReactionCalculator() {
             <div className="bg-amber-50/60 rounded-xl border border-amber-200 p-4">
               <div className="text-sm font-semibold text-slate-700 mb-0.5">已記住的樣品化合物</div>
               <div className="text-xs text-slate-500 mb-3">來自「記住此化合物」，獨立存放，不會與下方藥冊資料庫混合或一起匯入/匯出。點一列可編輯名稱與 MW，向左滑動可刪除</div>
-              <div className="space-y-1.5">
+              <div className="space-y-1.5 max-h-[248px] overflow-y-auto">
                 {sampleCompounds.map((s) => {
                   const isEditing = editingSampleCode === s.code;
                   return (
