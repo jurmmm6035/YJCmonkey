@@ -34,6 +34,35 @@ function formatMass(mg) {
   return `${fmt(mg, 2)} mg`;
 }
 
+function formatVolume(uL) {
+  if (uL === null || uL === undefined || isNaN(uL)) return "—";
+  if (uL >= 1000) return `${fmt(uL / 1000, 3)} mL`;
+  if (uL < 1) return `${fmt(uL, 3)} µL`;
+  return `${fmt(uL, 1)} µL`;
+}
+
+// 由密度或溶液濃度換算體積（回傳 µL）。
+// - 密度模式：體積(µL) = 重量(mg) ÷ 密度(g/mL)
+//     單位驗算：mg ÷ (g/mL) = mg·mL/g = 10⁻³ g·mL/g = 10⁻³ mL = 1 µL ✓
+// - 濃度模式：體積(µL) = mmol ÷ 濃度(M) × 1000
+//     因為 M = mol/L = mmol/mL，所以 mmol ÷ M 得到 mL，再乘 1000 換成 µL ✓
+//     注意濃度模式不需要分子量，n-BuLi 這類溶液只填濃度就能算。
+function computeVolumeUL(row, mmol, massMg) {
+  if (row.liquidMode === "density") {
+    const d = parseFloat(row.density);
+    if (isNaN(d) || d <= 0) return null;
+    if (massMg === null || massMg === undefined || isNaN(massMg)) return null;
+    return massMg / d;
+  }
+  if (row.liquidMode === "molarity") {
+    const m = parseFloat(row.molarity);
+    if (isNaN(m) || m <= 0) return null;
+    if (mmol === null || mmol === undefined || isNaN(mmol)) return null;
+    return (mmol / m) * 1000;
+  }
+  return null;
+}
+
 function formatTimestampLabel(ts) {
   return new Date(ts).toLocaleString("zh-TW", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
@@ -72,6 +101,8 @@ function csvToRows(text) {
   const casIdx = header.findIndex((h) => h.includes("cas"));
   const mwIdx = header.findIndex((h) => h.includes("mw") || h.includes("分子量"));
   const locationIdx = header.findIndex((h) => h.includes("location") || h.includes("位置"));
+  const densityIdx = header.findIndex((h) => h.includes("density") || h.includes("密度"));
+  const molarityIdx = header.findIndex((h) => h.includes("molarity") || h.includes("concentration") || h.includes("濃度"));
   const rows = [];
   for (let i = 1; i < lines.length; i++) {
     const cols = splitLine(lines[i]);
@@ -80,15 +111,17 @@ function csvToRows(text) {
     const mwRaw = mwIdx >= 0 ? cols[mwIdx] : cols[cols.length - 1];
     const mw = parseFloat(mwRaw);
     const location = locationIdx >= 0 ? cols[locationIdx] : "";
+    const density = densityIdx >= 0 ? cols[densityIdx] : "";
+    const molarity = molarityIdx >= 0 ? cols[molarityIdx] : "";
     if (name && !isNaN(mw)) {
-      rows.push({ name, cas: cas || "", mw, location: location || "" });
+      rows.push({ name, cas: cas || "", mw, location: location || "", density: density || "", molarity: molarity || "" });
     }
   }
   return rows;
 }
 
 function newRow() {
-  return { id: uid(), name: "", cas: "", mw: "", mmol: "", scaleUnit: "mmol", scaleValue: "", equivInput: "", remember: false, sampleCode: "" };
+  return { id: uid(), name: "", cas: "", mw: "", mmol: "", scaleUnit: "mmol", scaleValue: "", equivInput: "", remember: false, sampleCode: "", liquidMode: "", density: "", molarity: "" };
 }
 
 const SCALE_UNITS = ["mmol", "mg", "g"];
@@ -157,7 +190,7 @@ export default function ReactionCalculator() {
       } catch (e) {}
       if (!loadedDb) {
         try {
-          const seeded = defaultReagentDb.map((d) => ({ id: uid(), name: d.name, cas: d.cas || "", mw: d.mw, location: d.location || "" }));
+          const seeded = defaultReagentDb.map((d) => ({ id: uid(), name: d.name, cas: d.cas || "", mw: d.mw, location: d.location || "", density: d.density || "", molarity: d.molarity || "" }));
           setDb(seeded);
           await window.storage.set("reagent-db", JSON.stringify(seeded), false);
         } catch (e) {
@@ -318,16 +351,32 @@ export default function ReactionCalculator() {
 
   function computeRow(row) {
     const mw = parseFloat(row.mw);
+    const mwValid = !isNaN(mw) && mw > 0;
     const isReference = !!referenceRow && row.id === referenceRow.id;
+
     if (isReference) {
-      if (isNaN(rawKnownMmol) || rawKnownMmol <= 0) return { mmol: null, mass: null };
-      if (isNaN(mw) || mw <= 0) return { mmol: rawKnownMmol, mass: null };
-      return { mmol: rawKnownMmol, mass: rawKnownMmol * mw };
+      if (isNaN(rawKnownMmol) || rawKnownMmol <= 0) return { mmol: null, mass: null, volumeUL: null };
+      if (!mwValid) {
+        // 沒有 MW 也還是能用濃度模式算體積
+        return { mmol: rawKnownMmol, mass: null, volumeUL: computeVolumeUL(row, rawKnownMmol, null) };
+      }
+      const mass = rawKnownMmol * mw;
+      return { mmol: rawKnownMmol, mass, volumeUL: computeVolumeUL(row, rawKnownMmol, mass) };
     }
+
     const parsed = parseEquivInput(row.equivInput);
-    if (!baseValid || isNaN(mw) || mw <= 0 || !parsed) return { mmol: null, mass: null };
+    if (!baseValid || !parsed) return { mmol: null, mass: null, volumeUL: null };
     const mmol = baseMmol * parsed.equiv;
-    return { mmol, mass: mmol * mw, isPercent: parsed.isPercent };
+
+    if (!mwValid) {
+      // 濃度模式（例如 n-BuLi 2.5 M）不需要分子量就能算出體積
+      const volumeUL = computeVolumeUL(row, mmol, null);
+      if (volumeUL === null) return { mmol: null, mass: null, volumeUL: null };
+      return { mmol, mass: null, volumeUL, isPercent: parsed.isPercent };
+    }
+
+    const mass = mmol * mw;
+    return { mmol, mass, volumeUL: computeVolumeUL(row, mmol, mass), isPercent: parsed.isPercent };
   }
 
   // 代號已存在時，先要求確認再覆蓋（避免不知情地蓋掉舊資料）
@@ -402,6 +451,8 @@ export default function ReactionCalculator() {
       const name = String(item.name || "").trim();
       const mw = parseFloat(item.mw);
       const location = String(item.location || "").trim();
+      const density = String(item.density ?? "").trim();
+      const molarity = String(item.molarity ?? "").trim();
       if (!name || isNaN(mw)) continue;
       const key = cas ? cas.toLowerCase() : null;
       let existing = key ? byCas.get(key) : byName.get(name.toLowerCase());
@@ -409,9 +460,12 @@ export default function ReactionCalculator() {
         existing.name = name; existing.mw = mw;
         if (cas) existing.cas = cas;
         existing.location = mergeLocations(existing.location, location);
+        // 匯入檔沒填的話，保留原本已有的密度／濃度，不要被空值蓋掉
+        if (density) existing.density = density;
+        if (molarity) existing.molarity = molarity;
         updated++;
       } else {
-        const entry = { id: uid(), name, cas, mw, location };
+        const entry = { id: uid(), name, cas, mw, location, density, molarity };
         next.push(entry);
         if (cas) byCas.set(cas.toLowerCase(), entry);
         byName.set(name.toLowerCase(), entry);
@@ -425,7 +479,10 @@ export default function ReactionCalculator() {
   }
 
   function exportDb() {
-    const csv = ["name,cas,mw,location", ...db.map((d) => `"${d.name}","${d.cas || ""}",${d.mw},"${d.location || ""}"`)].join("\n");
+    const csv = [
+      "name,cas,mw,location,density,molarity",
+      ...db.map((d) => `"${d.name}","${d.cas || ""}",${d.mw},"${d.location || ""}","${d.density || ""}","${d.molarity || ""}"`),
+    ].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -435,7 +492,7 @@ export default function ReactionCalculator() {
     return true;
   }
 
-  const [newEntry, setNewEntry] = useState({ name: "", cas: "", mw: "", location: "" });
+  const [newEntry, setNewEntry] = useState({ name: "", cas: "", mw: "", location: "", density: "", molarity: "" });
   async function addDbEntry() {
     const mw = parseFloat(newEntry.mw);
     if (!newEntry.name || isNaN(mw)) {
@@ -444,18 +501,20 @@ export default function ReactionCalculator() {
     }
     const cas = newEntry.cas.trim();
     const location = newEntry.location.trim();
+    const density = newEntry.density.trim();
+    const molarity = newEntry.molarity.trim();
     const key = cas.toLowerCase();
     const existingIdx = cas ? db.findIndex((d) => String(d.cas || "").toLowerCase() === key) : -1;
     let next;
     if (existingIdx >= 0) {
       next = [...db];
-      next[existingIdx] = { ...next[existingIdx], name: newEntry.name, mw, location: mergeLocations(next[existingIdx].location, location) };
+      next[existingIdx] = { ...next[existingIdx], name: newEntry.name, mw, location: mergeLocations(next[existingIdx].location, location), density, molarity };
     } else {
-      next = [...db, { id: uid(), name: newEntry.name, cas, mw, location }];
+      next = [...db, { id: uid(), name: newEntry.name, cas, mw, location, density, molarity }];
     }
     await persistDb(next);
     showToast(existingIdx >= 0 ? `已更新「${newEntry.name}」（CAS 相符）` : `已新增「${newEntry.name}」到資料庫`);
-    setNewEntry({ name: "", cas: "", mw: "", location: "" });
+    setNewEntry({ name: "", cas: "", mw: "", location: "", density: "", molarity: "" });
     return true;
   }
   async function deleteDbEntry(id) { await persistDb(db.filter((d) => d.id !== id)); }
@@ -465,7 +524,7 @@ export default function ReactionCalculator() {
 
   const [dbFilter, setDbFilter] = useState("");
   const [editingDbId, setEditingDbId] = useState(null);
-  const [editBuffer, setEditBuffer] = useState({ name: "", cas: "", mw: "", location: "" });
+  const [editBuffer, setEditBuffer] = useState({ name: "", cas: "", mw: "", location: "", density: "", molarity: "" });
   const [editingSampleCode, setEditingSampleCode] = useState(null);
   const [sampleEditBuffer, setSampleEditBuffer] = useState({ name: "", mw: "" });
 
@@ -490,7 +549,11 @@ export default function ReactionCalculator() {
 
   function startEditDbEntry(d) {
     setEditingDbId(d.id);
-    setEditBuffer({ name: d.name, cas: d.cas || "", mw: String(d.mw), location: d.location || "" });
+    setEditBuffer({
+      name: d.name, cas: d.cas || "", mw: String(d.mw), location: d.location || "",
+      density: d.density !== undefined && d.density !== null ? String(d.density) : "",
+      molarity: d.molarity !== undefined && d.molarity !== null ? String(d.molarity) : "",
+    });
   }
   function cancelEditDbEntry() {
     setEditingDbId(null);
@@ -502,7 +565,10 @@ export default function ReactionCalculator() {
       return false;
     }
     const name = editBuffer.name.trim();
-    await updateDbEntry(id, { name, cas: editBuffer.cas.trim(), mw, location: editBuffer.location.trim() });
+    await updateDbEntry(id, {
+      name, cas: editBuffer.cas.trim(), mw, location: editBuffer.location.trim(),
+      density: editBuffer.density.trim(), molarity: editBuffer.molarity.trim(),
+    });
     setEditingDbId(null);
     showToast(`已更新「${name}」`);
     return true;
@@ -650,7 +716,18 @@ export default function ReactionCalculator() {
                         db={db}
                         samples={sampleCompounds}
                         value={row.name}
-                        onSelect={(entry) => updateRow(row.id, { name: entry.name, cas: entry.cas || "", mw: String(entry.mw) })}
+                        onSelect={(entry) => {
+                          // 資料庫若有存密度／濃度，選取時自動帶入並自動開啟液體欄位
+                          const patch = { name: entry.name, cas: entry.cas || "", mw: String(entry.mw) };
+                          if (entry.density !== undefined && entry.density !== null && String(entry.density) !== "") {
+                            patch.density = String(entry.density);
+                            patch.liquidMode = "density";
+                          } else if (entry.molarity !== undefined && entry.molarity !== null && String(entry.molarity) !== "") {
+                            patch.molarity = String(entry.molarity);
+                            patch.liquidMode = "molarity";
+                          }
+                          updateRow(row.id, patch);
+                        }}
                         onNameChange={(v) => updateRow(row.id, { name: v })}
                         placeholder="名稱/代號/CAS"
                       />
@@ -684,9 +761,47 @@ export default function ReactionCalculator() {
                         className={inputCls} style={ringStyle} />
                     </div>
 
+                    {/* 液體試劑：密度 或 溶液濃度 */}
+                    {row.liquidMode && (
+                      <div className="flex items-center gap-2 px-1 mt-1.5 flex-wrap">
+                        <div className="flex rounded-lg border border-slate-200 overflow-hidden text-xs shrink-0">
+                          <button type="button" onClick={() => updateRow(row.id, { liquidMode: "density" })}
+                            className={`px-2 py-1 ${row.liquidMode === "density" ? "text-white" : "text-slate-500 bg-white"}`}
+                            style={row.liquidMode === "density" ? { backgroundColor: ACCENT } : undefined}>
+                            密度
+                          </button>
+                          <button type="button" onClick={() => updateRow(row.id, { liquidMode: "molarity" })}
+                            className={`px-2 py-1 border-l border-slate-200 ${row.liquidMode === "molarity" ? "text-white" : "text-slate-500 bg-white"}`}
+                            style={row.liquidMode === "molarity" ? { backgroundColor: ACCENT } : undefined}>
+                            濃度
+                          </button>
+                        </div>
+                        {row.liquidMode === "density" ? (
+                          <div className="relative shrink-0">
+                            <input type="text" inputMode="decimal" value={row.density}
+                              onChange={(e) => updateRow(row.id, { density: e.target.value })}
+                              placeholder="密度"
+                              className="border border-slate-200 rounded-lg pl-2 pr-11 py-1 text-xs w-28 focus:outline-none focus:ring-2" style={ringStyle} />
+                            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-slate-400 pointer-events-none">g/mL</span>
+                          </div>
+                        ) : (
+                          <div className="relative shrink-0">
+                            <input type="text" inputMode="decimal" value={row.molarity}
+                              onChange={(e) => updateRow(row.id, { molarity: e.target.value })}
+                              placeholder="濃度"
+                              className="border border-slate-200 rounded-lg pl-2 pr-6 py-1 text-xs w-24 focus:outline-none focus:ring-2" style={ringStyle} />
+                            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-slate-400 pointer-events-none">M</span>
+                          </div>
+                        )}
+                        <span className="text-[11px] text-slate-400">
+                          {row.liquidMode === "density" ? "純液體，由重量換算體積" : "溶液，不需分子量"}
+                        </span>
+                      </div>
+                    )}
+
                     {/* weight line + remember */}
                     <div className="flex items-center justify-between px-1 mt-1.5 flex-wrap gap-2">
-                      <div className="text-sm flex items-baseline gap-1.5">
+                      <div className="text-sm flex items-baseline gap-1.5 flex-wrap">
                         {isBase && row.scaleUnit !== "mmol" ? (
                           <>
                             <span className="text-slate-400">mmol</span>
@@ -698,8 +813,21 @@ export default function ReactionCalculator() {
                             <span className="font-semibold" style={{ color: ACCENT }}>{formatMass(result.mass)}</span>
                           </>
                         )}
+                        {row.liquidMode && (
+                          <>
+                            <span className="text-slate-300">·</span>
+                            <span className="text-slate-400">體積</span>
+                            <span className="font-semibold" style={{ color: "#0f766e" }}>{formatVolume(result.volumeUL)}</span>
+                          </>
+                        )}
                       </div>
                       <div className="flex items-center gap-3 flex-wrap">
+                        <label className="flex items-center gap-1.5 text-xs text-slate-500">
+                          <input type="checkbox" checked={!!row.liquidMode}
+                            onChange={(e) => updateRow(row.id, { liquidMode: e.target.checked ? "density" : "" })}
+                            className="rounded" />
+                          液體
+                        </label>
                         <label className="flex items-center gap-1.5 text-xs text-slate-500">
                           <input type="checkbox" checked={row.remember}
                             onChange={(e) => updateRow(row.id, {
@@ -995,7 +1123,7 @@ export default function ReactionCalculator() {
               </ActionButton>
             </div>
             <div className="text-xs text-slate-400 mt-2">
-              CSV 欄位需含 name（名稱）、cas（可省略）、mw（分子量），可另外加 location（位置，選填）。CAS 相符會覆蓋更新，沒有 CAS 則用名稱比對。
+              CSV 欄位需含 name（名稱）、cas（可省略）、mw（分子量），可另外加 location（位置）、density（密度 g/mL）、molarity（濃度 M），皆為選填。CAS 相符會覆蓋更新，沒有 CAS 則用名稱比對；匯入檔沒填密度／濃度時會保留原有的值。
             </div>
             {importMsg && (
               <div className={`mt-2 text-xs px-3 py-2 rounded-lg flex items-center gap-1.5 ${importMsg.type === "success" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-600"}`}>
@@ -1012,6 +1140,11 @@ export default function ReactionCalculator() {
               <input type="text" value={newEntry.cas} onChange={(e) => setNewEntry((n) => ({ ...n, cas: e.target.value }))} placeholder="CAS（選填）" className={inputCls} style={ringStyle} />
               <input type="text" inputMode="decimal" value={newEntry.mw} onChange={(e) => setNewEntry((n) => ({ ...n, mw: e.target.value }))} placeholder="MW" className={inputCls} style={ringStyle} />
               <input type="text" value={newEntry.location} onChange={(e) => setNewEntry((n) => ({ ...n, location: e.target.value }))} placeholder="位置（選填，如 鄭家-A1-1）" className={inputCls} style={ringStyle} />
+              <input type="text" inputMode="decimal" value={newEntry.density} onChange={(e) => setNewEntry((n) => ({ ...n, density: e.target.value }))} placeholder="密度 g/mL（選填）" className={inputCls} style={ringStyle} />
+              <input type="text" inputMode="decimal" value={newEntry.molarity} onChange={(e) => setNewEntry((n) => ({ ...n, molarity: e.target.value }))} placeholder="濃度 M（選填）" className={inputCls} style={ringStyle} />
+            </div>
+            <div className="text-xs text-slate-400 mt-1.5">
+              密度與濃度為選填，填了之後在「計算」頁選到這個試劑會自動帶入並顯示體積。純液體填密度，溶液（如 n-BuLi 2.5 M）填濃度。
             </div>
             <ActionButton onAction={addDbEntry} doneLabel="已新增" disabled={!newEntry.name || !newEntry.mw}
               className="mt-2 text-sm px-3 py-2 rounded-lg text-white disabled:opacity-30 flex items-center gap-1.5" style={{ backgroundColor: ACCENT }}>
@@ -1100,6 +1233,12 @@ export default function ReactionCalculator() {
                               <input type="text" value={editBuffer.location}
                                 onChange={(e) => setEditBuffer((b) => ({ ...b, location: e.target.value }))}
                                 placeholder="位置" className={inputCls + " text-sm"} style={ringStyle} />
+                              <input type="text" inputMode="decimal" value={editBuffer.density}
+                                onChange={(e) => setEditBuffer((b) => ({ ...b, density: e.target.value }))}
+                                placeholder="密度 g/mL" className={inputCls + " text-sm"} style={ringStyle} />
+                              <input type="text" inputMode="decimal" value={editBuffer.molarity}
+                                onChange={(e) => setEditBuffer((b) => ({ ...b, molarity: e.target.value }))}
+                                placeholder="濃度 M" className={inputCls + " text-sm"} style={ringStyle} />
                             </div>
                             <div className="flex gap-2">
                               <button onClick={() => saveEditDbEntry(d.id)}
@@ -1118,7 +1257,10 @@ export default function ReactionCalculator() {
                           <button onClick={() => startEditDbEntry(d)} className="w-full text-left py-2 px-1 text-sm rounded-lg bg-white hover:bg-slate-50">
                             <div className="font-medium text-slate-700">{d.name}</div>
                             <div className="text-xs text-slate-400">
-                              {d.cas ? `CAS ${d.cas} · ` : ""}MW {d.mw}{d.location ? ` · 位置 ${d.location}` : ""}
+                              {d.cas ? `CAS ${d.cas} · ` : ""}MW {d.mw}
+                              {d.density ? ` · 密度 ${d.density} g/mL` : ""}
+                              {d.molarity ? ` · 濃度 ${d.molarity} M` : ""}
+                              {d.location ? ` · 位置 ${d.location}` : ""}
                             </div>
                           </button>
                         )}
